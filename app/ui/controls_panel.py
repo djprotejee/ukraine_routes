@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QDoubleSpinBox,
     QLineEdit,
+    QCheckBox,
 )
 
 from app.services import GraphService
@@ -26,6 +27,7 @@ class ControlsPanel(QWidget):
     - вибір початкового та цільового міста;
     - запуск/паузи/кроки візуалізації;
     - налаштування затримки;
+    - вмикання/вимикання карти України;
     - редагування графу (вершини/ребра).
     """
 
@@ -42,6 +44,9 @@ class ControlsPanel(QWidget):
     # --- сигнали зміни початкового/кінцевого міста ---
     source_city_changed = Signal(str)
     target_city_changed = Signal(str)
+
+    # --- карта України ---
+    map_visibility_changed = Signal(bool)
 
     def __init__(self, graph_service: GraphService, parent=None) -> None:
         super().__init__(parent)
@@ -95,10 +100,15 @@ class ControlsPanel(QWidget):
         self.delay_spin = QSpinBox()
         self.delay_spin.setRange(50, 5000)
         self.delay_spin.setSingleStep(50)
-        self.delay_spin.setValue(500)
+        self.delay_spin.setValue(300)
         delay_layout.addWidget(self.delay_spin)
 
         viz_layout.addLayout(delay_layout)
+
+        # чекбокс «Показувати карту України»
+        self.map_checkbox = QCheckBox("Показувати карту України")
+        self.map_checkbox.setChecked(True)
+        viz_layout.addWidget(self.map_checkbox)
 
         viz_group.setLayout(viz_layout)
         root_layout.addWidget(viz_group)
@@ -195,6 +205,11 @@ class ControlsPanel(QWidget):
         )
         self.combo_target.currentTextChanged.connect(
             self.target_city_changed.emit
+        )
+
+        # карта
+        self.map_checkbox.stateChanged.connect(
+            lambda state: self.map_visibility_changed.emit(state == Qt.Checked)
         )
 
     # ---------- API для MainWindow ----------

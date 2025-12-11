@@ -88,8 +88,22 @@ class MainWindow(QMainWindow):
         # Початкове відображення графа
         self.graph_canvas.refresh()
 
+        # Список міст
+        cities = self._graph_service.list_cities()
+
         # Передамо список міст у панель
-        self.controls.update_cities(self._graph_service.list_cities())
+        self.controls.update_cities(cities)
+
+        # --- дефолтний маршрут, наприклад Ужгород → Луганськ ---
+        default_source = "Ужгород"
+        default_target = "Луганськ"
+
+        if default_source in cities:
+            self.controls.set_source_city(default_source)
+            self.graph_canvas.set_source_city(default_source)
+        if default_target in cities:
+            self.controls.set_target_city(default_target)
+            self.graph_canvas.set_target_city(default_target)
 
     def _connect_signals(self) -> None:
         """
@@ -112,6 +126,11 @@ class MainWindow(QMainWindow):
         )
         self.controls.target_city_changed.connect(
             self.graph_canvas.set_target_city
+        )
+
+        # зміна видимості карти
+        self.controls.map_visibility_changed.connect(
+            self.graph_canvas.set_show_map
         )
 
         # --- з GraphCanvas (клік по місту / мапі) ---
@@ -207,10 +226,6 @@ class MainWindow(QMainWindow):
         arrow_parts.append(path[-1])
 
         total_str = f"{total:.0f} км" if total is not None else "—"
-
-        arrow_line = "  ".join(
-            part.replace("()", "") for part in arrow_parts
-        )  # запасний захист
 
         pretty_arrow_line = " → ".join(arrow_parts)
 

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QPen, QBrush, QTransform, QFont, QColor
+from PySide6.QtGui import QPen, QBrush, QTransform, QFont, QColor, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsView,
     QGraphicsScene,
     QGraphicsEllipseItem,
     QGraphicsLineItem,
     QGraphicsTextItem,
+    QGraphicsPixmapItem,
+    QGraphicsRectItem,
 )
 
 from app.models import Graph
@@ -22,6 +25,7 @@ class NodeItems:
     """Графічні елементи однієї вершини."""
     circle: QGraphicsEllipseItem
     label: QGraphicsTextItem
+    label_bg: QGraphicsRectItem
 
 
 @dataclass
@@ -40,8 +44,27 @@ class GraphCanvas(QGraphicsView):
     - вибір міст (Shift/Ctrl/клік);
     - постійне підсвічування початкової/кінцевої вершин;
     - візуалізація кроків Дейкстри;
-    - знайдений шлях видно після «Знайти шлях» і після завершення «Авто».
+    - знайдений шлях видно після «Знайти шлях» і після завершення «Авто»;
+    - фонове зображення карти України (опційно).
     """
+
+    # Палітра для графу
+    COLOR_NODE_BASE = QColor("#1565c0")  # синій вузол
+    COLOR_NODE_BORDER = QColor("#ffffff")  # біла обводка
+    COLOR_NODE_LABEL = QColor("#0d0d0d")  # темний текст
+
+    COLOR_EDGE_BASE = QColor(0, 0, 0, 130)  # напівпрозорі чорні ребра
+    COLOR_EDGE_LABEL = QColor("#37474f")  # темно сірий текст ваги
+
+    COLOR_PATH_NODE = QColor("#73e600")  # бірюзові вузли шляху
+    COLOR_PATH_EDGE = QColor("#ff6d00")  # помаранчеві ребра шляху
+
+    COLOR_SOURCE = QColor("#2e7d32")  # зелений старт
+    COLOR_TARGET = QColor("#c62828")  # червоний фініш
+
+    COLOR_VISITED = QColor("#cc33ff")  # сині відвідані
+    COLOR_CURRENT = QColor("#ffeb3b")  # жовтий поточний
+    COLOR_NEIGHBOR = QColor("#e53935")  # червоний сусід
 
     # Сигнали для MainWindow / ControlsPanel
     node_source_selected = Signal(str)          # Shift + клік по місту
@@ -49,7 +72,7 @@ class GraphCanvas(QGraphicsView):
     node_selected = Signal(str)                 # клік по місту без модифікаторів
     position_selected = Signal(float, float)    # клік по порожньому місцю (x, y у сцені)
 
-    NODE_RADIUS = 14
+    NODE_RADIUS = 20
 
     def __init__(self, graph: Graph, parent=None) -> None:
         super().__init__(parent)
@@ -59,11 +82,11 @@ class GraphCanvas(QGraphicsView):
         self.setScene(self._scene)
 
         # Початковий масштаб
-        INITIAL_SCALE = 0.8
+        INITIAL_SCALE = 1
         self.scale(INITIAL_SCALE, INITIAL_SCALE)
 
         # Кроки Дейкстри
-        self._step_delay_ms = 500
+        self._step_delay_ms = 300
         self._steps: List[Step] = []
         self._current_step_index = 0
         self._timer = QTimer(self)
@@ -72,6 +95,11 @@ class GraphCanvas(QGraphicsView):
         # Графічні елементи
         self._node_items: Dict[str, NodeItems] = {}
         self._edge_items: Dict[str, EdgeItems] = {}
+
+        # Фонова карта
+        self._show_map: bool = True
+        self._map_item: Optional[QGraphicsPixmapItem] = None
+        self._map_pixmap: Optional[QPixmap] = None
 
         # Стан панорамування
         self._panning = False
@@ -95,6 +123,63 @@ class GraphCanvas(QGraphicsView):
         self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
 
+    # ---------- Публічне керування картою ----------
+
+    def set_show_map(self, show: bool) -> None:
+        """
+        Вмикає / вимикає відображення фонової карти.
+        Викликати, наприклад, з чекбоксу в панелі керування.
+        """
+        self._show_map = bool(show)
+        self.refresh()
+
+    # ---------- Завантаження та додавання карти ----------
+
+    def _load_map_pixmap(self) -> Optional[QPixmap]:
+        """Пробує знайти карту України в папці data/."""
+        if self._map_pixmap is not None:
+            return self._map_pixmap
+
+        data_dir = Path(__file__).resolve().parents[1] / "resources" / "images"
+        candidates = [
+            "ukraine-map.jpg",
+            "ukraine-map.png",
+            "ukraine_map.jpg",
+            "ukraine_map.png",
+        ]
+
+        for name in candidates:
+            path = data_dir / name
+            if path.exists():
+                pixmap = QPixmap(str(path))
+                if not pixmap.isNull():
+                    self._map_pixmap = pixmap
+                    return pixmap
+
+        # Якщо не знайшли файл – просто працюємо без карти
+        self._map_pixmap = None
+        return None
+
+    def _add_background_map(self) -> None:
+        """
+        Додає на сцену фонову карту 1:1 у тих же координатах,
+        що й вершини (x/y з data_loader уже в пікселях 781×603).
+        """
+        if not self._show_map:
+            return
+
+        pixmap = self._load_map_pixmap()
+        if pixmap is None or pixmap.isNull():
+            return
+
+        item = self._scene.addPixmap(pixmap)
+        item.setZValue(-100)
+
+        # Сцена від 0,0 до розміру картинки
+        self._scene.setSceneRect(0, 0, pixmap.width(), pixmap.height())
+
+        self._map_item = item
+
     # ---------- Загальне оновлення ----------
 
     def refresh(self) -> None:
@@ -102,8 +187,11 @@ class GraphCanvas(QGraphicsView):
         self._scene.clear()
         self._node_items.clear()
         self._edge_items.clear()
+        self._map_item = None
 
-        # Спочатку ребра, потім вершини
+        # Спочатку додаємо карту, потім ребра й вершини
+        self._add_background_map()
+
         for edge in self._graph.edges:
             self._draw_edge(edge.source, edge.target, edge.weight)
 
@@ -155,26 +243,47 @@ class GraphCanvas(QGraphicsView):
     def show_next_step(self) -> None:
         """
         Показує наступний крок візуалізації.
-        Якщо кроки закінчились – зупиняємо таймер і показуємо шлях (якщо є).
+        Якщо кроки закінчились – зупиняємо таймер і показуємо шлях (якщо є),
+        причому вершини шляху – зелені, а інші відвідані – фіолетові.
         """
         if not self._steps:
             self._timer.stop()
-            # якщо шлях є, робимо його видимим
             if self._current_path:
                 self._path_visible = True
                 self._apply_all_coloring()
             return
 
         if self._current_step_index >= len(self._steps):
+            # усе вже показали – фінальний стан
             self._timer.stop()
+
+            # показуємо шлях, якщо є
             if self._current_path:
                 self._path_visible = True
-                self._apply_all_coloring()
+
+            # база + шлях + source/target
+            self._apply_all_coloring()
+
+            # поверх цього – visited, але тільки ті,
+            # які НЕ входять у шлях і не є source/target
+            last_step = self._steps[-1]
+            for name in last_step.visited:
+                if name in (self._source_city, self._target_city):
+                    continue
+                if self._current_path and name in self._current_path:
+                    continue  # вузли шляху лишаємо зеленими
+
+                node = self._node_items.get(name)
+                if node:
+                    node.circle.setBrush(QBrush(self.COLOR_VISITED))
+
+            # ще раз поверх – source/target, щоб їх колір не перебити
+            self._apply_source_target_markers()
             return
 
+        # звичайний крок анімації
         step = self._steps[self._current_step_index]
         self._current_step_index += 1
-
         self._apply_step_visual(step)
 
     def start_auto_play(self) -> None:
@@ -214,23 +323,57 @@ class GraphCanvas(QGraphicsView):
 
     def _draw_vertex(self, name: str, x: float, y: float) -> None:
         r = self.NODE_RADIUS
+
+        # Коло вузла
         circle = self._scene.addEllipse(
             x - r,
             y - r,
             2 * r,
             2 * r,
-            QPen(Qt.white),
-            QBrush(Qt.darkCyan),
+            QPen(self.COLOR_NODE_BORDER, 2),
+            QBrush(self.COLOR_NODE_BASE),
         )
 
+        # Текст
         label = self._scene.addText(name)
         font = QFont()
-        font.setPointSize(12)
+        font.setPointSize(7)  # менший шрифт
+        font.setBold(True)
         label.setFont(font)
-        label.setDefaultTextColor(Qt.white)
-        label.setPos(x + r + 2, y - r / 2)
+        label.setDefaultTextColor(self.COLOR_NODE_LABEL)
+        label.setPos(0, 0)  # тимчасово, щоб взяти boundingRect
 
-        self._node_items[name] = NodeItems(circle=circle, label=label)
+        br = label.boundingRect()
+        padding = 1.5  # менший відступ
+
+        # розмір плашки: за замовчуванням менша, але якщо текст широкий — може вилізти за коло
+        w = br.width() + 2 * padding
+        h = br.height() + 2 * padding
+
+        bg_rect = self._scene.addRect(
+            x - w / 2,
+            y - h / 2,
+            w,
+            h,
+            QPen(QColor("#212121"), 1.2),
+            QBrush(QColor(255, 249, 196, 230)),  # світло-жовта, трохи прозора
+        )
+
+        # центруємо текст у плашці / колі
+        label.setPos(
+            x - br.width() / 2,
+            y - br.height() / 2,
+        )
+
+        circle.setZValue(0)
+        bg_rect.setZValue(1)
+        label.setZValue(2)
+
+        self._node_items[name] = NodeItems(
+            circle=circle,
+            label=label,
+            label_bg=bg_rect,
+        )
 
     def _draw_edge(self, source: str, target: str, weight: float) -> None:
         v1 = self._graph.vertices[source]
@@ -241,7 +384,7 @@ class GraphCanvas(QGraphicsView):
             v1.y,
             v2.x,
             v2.y,
-            QPen(Qt.gray),
+            QPen(self.COLOR_EDGE_BASE, 1.6),
         )
 
         mid_x = (v1.x + v2.x) / 2
@@ -250,7 +393,7 @@ class GraphCanvas(QGraphicsView):
         font = QFont()
         font.setPointSize(12)
         label.setFont(font)
-        label.setDefaultTextColor(Qt.lightGray)
+        label.setDefaultTextColor(self.COLOR_EDGE_LABEL)
         label.setPos(mid_x, mid_y)
 
         key = f"{source}->{target}"
@@ -261,13 +404,13 @@ class GraphCanvas(QGraphicsView):
     def _set_base_colors(self) -> None:
         """Базова розмальовка без шляху і без кроків."""
         for node in self._node_items.values():
-            node.circle.setBrush(QBrush(Qt.darkCyan))
-            node.circle.setPen(QPen(Qt.white, 1))
+            node.circle.setBrush(QBrush(self.COLOR_NODE_BASE))
+            node.circle.setPen(QPen(self.COLOR_NODE_BORDER, 2))
 
         for edge in self._edge_items.values():
-            pen = QPen(Qt.gray, 1)
+            pen = QPen(self.COLOR_EDGE_BASE, 1.6)
             edge.line.setPen(pen)
-            edge.label.setDefaultTextColor(Qt.lightGray)
+            edge.label.setDefaultTextColor(self.COLOR_EDGE_LABEL)
 
     def _apply_path_highlight(self) -> None:
         """Підсвічує знайдений шлях (якщо path_visible = True)."""
@@ -280,7 +423,7 @@ class GraphCanvas(QGraphicsView):
                 continue
             node = self._node_items.get(name)
             if node:
-                node.circle.setBrush(QBrush(Qt.green))
+                node.circle.setBrush(QBrush(self.COLOR_PATH_NODE))
 
         # ребра шляху – товстіші й зелені
         for i in range(len(self._current_path) - 1):
@@ -292,20 +435,19 @@ class GraphCanvas(QGraphicsView):
             if edge:
                 pen = edge.line.pen()
                 pen.setWidth(3)
-                pen.setColor(Qt.green)
+                pen.setColor(self.COLOR_PATH_EDGE)
                 edge.line.setPen(pen)
 
     def _apply_source_target_markers(self) -> None:
         """Підсвічує source/target поверх усього."""
-        dark_green = QColor("#1b5e20")
 
         if self._source_city and self._source_city in self._node_items:
             node = self._node_items[self._source_city]
-            node.circle.setBrush(QBrush(dark_green))
+            node.circle.setBrush(QBrush(self.COLOR_SOURCE))
 
         if self._target_city and self._target_city in self._node_items:
             node = self._node_items[self._target_city]
-            node.circle.setBrush(QBrush(Qt.red))
+            node.circle.setBrush(QBrush(self.COLOR_TARGET))
 
     def _apply_all_coloring(self) -> None:
         """
@@ -321,25 +463,40 @@ class GraphCanvas(QGraphicsView):
     def _apply_step_visual(self, step: Step) -> None:
         """
         Накладає крок візуалізації на поточну розмальовку.
-        Використовується і для «Крок», і для «Авто».
+        Порядок:
+        1) база;
+        2) visited (крім вершин шляху, щоб не бити зелений);
+        3) шлях (якщо показуємо);
+        4) current / neighbor;
+        5) source / target.
         """
-        # 1) база + (можливо) шлях + source/target
-        self._apply_all_coloring()
+        # 1) база
+        self._set_base_colors()
 
-        # 2) зверху – крок Дейкстри
+        # 2) visited, але НЕ вершини шляху (якщо шлях видимий)
         for name in step.visited:
             node = self._node_items.get(name)
-            if node:
-                node.circle.setBrush(QBrush(Qt.blue))
+            if not node:
+                continue
+            if self._path_visible and name in self._current_path:
+                # цю вершину потім пофарбує _apply_path_highlight()
+                continue
+            node.circle.setBrush(QBrush(self.COLOR_VISITED))
 
+        # 3) шлях (зелений), якщо його зараз показуємо
+        if self._path_visible:
+            self._apply_path_highlight()
+
+        # 4) поточна вершина
         current_node = self._node_items.get(step.current)
         if current_node:
-            current_node.circle.setBrush(QBrush(Qt.yellow))
+            current_node.circle.setBrush(QBrush(self.COLOR_CURRENT))
 
+        # 4.1) сусід + ребро до нього
         if step.neighbor:
-            node = self._node_items.get(step.neighbor)
-            if node:
-                node.circle.setBrush(QBrush(Qt.red))
+            neighbor_node = self._node_items.get(step.neighbor)
+            if neighbor_node:
+                neighbor_node.circle.setBrush(QBrush(self.COLOR_NEIGHBOR))
 
             key1 = f"{step.current}->{step.neighbor}"
             key2 = f"{step.neighbor}->{step.current}"
@@ -347,10 +504,10 @@ class GraphCanvas(QGraphicsView):
             if edge:
                 pen = edge.line.pen()
                 pen.setWidth(3)
-                pen.setColor(Qt.red)
+                pen.setColor(self.COLOR_NEIGHBOR)
                 edge.line.setPen(pen)
 
-        # 3) ще раз поверх – source/target, щоб не "перебити" їх кольори
+        # 5) source / target поверх усього
         self._apply_source_target_markers()
 
     # ---------- Зум, панорамування, drag вершин, вибір ----------
@@ -380,7 +537,7 @@ class GraphCanvas(QGraphicsView):
             clicked_city: Optional[str] = None
             if item is not None:
                 for name, node in self._node_items.items():
-                    if item is node.circle or item is node.label:
+                    if item in (node.circle, node.label, node.label_bg):
                         clicked_city = name
                         break
 
@@ -418,17 +575,32 @@ class GraphCanvas(QGraphicsView):
             v.x = scene_pos.x()
             v.y = scene_pos.y()
 
-            # оновлюємо коло
             r = self.NODE_RADIUS
             items = self._node_items[name]
+
+            # коло
             items.circle.setRect(
                 v.x - r,
                 v.y - r,
                 2 * r,
                 2 * r,
             )
-            # оновлюємо підпис вершини
-            items.label.setPos(v.x + r + 2, v.y - r / 2)
+
+            # текст + плашка по центру вузла
+            br = items.label.boundingRect()
+            padding = 1.5  # такий самий як у _draw_vertex
+
+            items.label_bg.setRect(
+                v.x - br.width() / 2 - padding,
+                v.y - br.height() / 2 - padding,
+                br.width() + 2 * padding,
+                br.height() + 2 * padding,
+            )
+
+            items.label.setPos(
+                v.x - br.width() / 2,
+                v.y - br.height() / 2,
+            )
 
             # оновлюємо всі ребра, де ця вершина
             for key, edge_item in self._edge_items.items():
