@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import List, Optional
+import time
+from typing import Optional
 
 from app.models import Graph, DijkstraResult, run_dijkstra
 
@@ -20,11 +21,20 @@ class PathService:
     ) -> Optional[DijkstraResult]:
         if source not in self._graph.vertices or target not in self._graph.vertices:
             return None
+
+        # вимірюємо час
+        t_start = time.perf_counter()
+
         if source == target:
-            # тривіальний шлях – одна вершина з нульовою довжиною
             result = run_dijkstra(self._graph, source, target)
             result.path = [source]
             result.total = 0.0
-            return result
+        else:
+            result = run_dijkstra(self._graph, source, target)
 
-        return run_dijkstra(self._graph, source, target)
+        t_end = time.perf_counter()
+
+        # додаємо нове поле до результату
+        result.time_ms = (t_end - t_start) * 1000.0  # час у мілісекундах
+
+        return result

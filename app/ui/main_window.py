@@ -155,6 +155,7 @@ class MainWindow(QMainWindow):
         передає шлях і кроки в Canvas.
         """
         result = self._path_service.find_shortest_path(source, target)
+        self._last_result = result
         if result is None or not result.path:
             self._set_result_text("Шлях не знайдено.")
             self.graph_canvas.clear_path_highlight()
@@ -198,6 +199,30 @@ class MainWindow(QMainWindow):
     def _set_result_text(self, text: str) -> None:
         self.result_view.setPlainText(text)
 
+    def _format_time(self) -> str:
+        """
+        Форматує час виконання алгоритму з останнього результату.
+        Повертає рядок типу '0.42 мс' або '1.234 с'.
+        """
+        result = getattr(self, "_last_result", None)
+        if result is None:
+            return "—"
+
+        time_ms = getattr(result, "time_ms", None)
+        if time_ms is None:
+            return "—"
+
+        # < 1 мс – показати з більшою точністю
+        if time_ms < 1.0:
+            return f"{time_ms:.3f} мс"
+        # < 1000 мс – просто мілісекунди
+        if time_ms < 1000.0:
+            return f"{time_ms:.2f} мс"
+
+        # >= 1 с – переводимо в секунди
+        seconds = time_ms / 1000.0
+        return f"{seconds:.3f} с"
+
     def _format_path_result(
         self, path: List[str], total: Optional[float]
     ) -> str:
@@ -230,7 +255,7 @@ class MainWindow(QMainWindow):
         pretty_arrow_line = " → ".join(arrow_parts)
 
         return (
-            f"Найкоротший шлях: {total_str}\n"
+            f"Найкоротший шлях: {total_str} (час: {self._format_time()})\n"
             f"{pretty_arrow_line}\n\n"
             f"Сегменти:\n  " + "\n  ".join(segments)
         )

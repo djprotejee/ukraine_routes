@@ -32,12 +32,14 @@ class DijkstraResult:
     - path        – відновлений шлях від source до target (якщо задано);
     - total       – сумарна довжина цього шляху (або None, якщо недосяжно);
     - steps       – кроки для візуалізації.
+    - time_ms      – час виконання алгоритму
     """
     distances: Dict[str, float]
     previous: Dict[str, Optional[str]]
     path: List[str]
     total: Optional[float]
     steps: List[Step]
+    time_ms: float = 0.0
 
 
 def _reconstruct_path(previous: Dict[str, Optional[str]],
