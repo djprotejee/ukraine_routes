@@ -19,8 +19,9 @@ class Vertex:
 @dataclass
 class Edge:
     """
-    Неорієнтоване ребро між двома вершинами.
+    Ребро між двома вершинами.
     weight – відстань у кілометрах.
+    Тут трактуємо Edge як ОРІЄНТОВАНЕ ребро source -> target.
     """
     source: str
     target: str
@@ -83,9 +84,9 @@ class Graph:
         # Видалити саму вершину
         self._vertices.pop(name, None)
 
-    def add_edge(self, source: str, target: str, weight: float) -> None:
+    def add_directed_edge(self, source: str, target: str, weight: float) -> None:
         """
-        Додає неорієнтоване ребро.
+        Додає ОРІЄНТОВАНЕ ребро source -> target.
         Якщо вершини не існують – створюємо їх у координатах (0,0).
         """
         if source == target:
@@ -96,23 +97,44 @@ class Graph:
         if target not in self._vertices:
             self.add_vertex(target)
 
-        # Запис у список ребер
+        # Запис у список орієнтованих ребер
         self._edges.append(Edge(source=source, target=target, weight=weight))
 
-        # Запис у матрицю суміжності
+        # Запис у матрицю суміжності тільки в один бік
         self._adjacency.setdefault(source, {})[target] = weight
-        self._adjacency.setdefault(target, {})[source] = weight
 
-    def remove_edge(self, source: str, target: str) -> None:
+    def add_undirected_edge(self, source: str, target: str, weight: float) -> None:
         """
-        Видаляє ребро між source та target, якщо воно є.
+        Додає НЕорієнтовану дорогу (тобто дві дуги: source->target і target->source).
+        """
+        self.add_directed_edge(source, target, weight)
+        self.add_directed_edge(target, source, weight)
+
+    # для зворотної сумісності – стара назва лишається як "дорога в обидва боки"
+    def add_edge(self, source: str, target: str, weight: float) -> None:
+        self.add_undirected_edge(source, target, weight)
+
+    def remove_directed_edge(self, source: str, target: str) -> None:
+        """
+        Видаляє тільки дугу source -> target.
+        """
+        self._edges = [
+            e for e in self._edges
+            if not (e.source == source and e.target == target)
+        ]
+        if source in self._adjacency:
+            self._adjacency[source].pop(target, None)
+
+    def remove_undirected_edge(self, source: str, target: str) -> None:
+        """
+        Видаляє дорогу повністю – обидві дуги (source->target і target->source).
         """
         self._edges = [
             e
             for e in self._edges
             if not (
-                (e.source == source and e.target == target)
-                or (e.source == target and e.target == source)
+                    (e.source == source and e.target == target)
+                    or (e.source == target and e.target == source)
             )
         ]
 
@@ -120,6 +142,10 @@ class Graph:
             self._adjacency[source].pop(target, None)
         if target in self._adjacency:
             self._adjacency[target].pop(source, None)
+
+    # зворотна сумісність
+    def remove_edge(self, source: str, target: str) -> None:
+        self.remove_undirected_edge(source, target)
 
     # ----------------- допоміжні методи -----------------
 

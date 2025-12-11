@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QLineEdit,
     QCheckBox,
+    QMessageBox,
 )
 
 from app.services import GraphService
@@ -166,10 +167,13 @@ class ControlsPanel(QWidget):
         remove_road_form = QFormLayout()
         self.combo_remove_road_from = QComboBox()
         self.combo_remove_road_to = QComboBox()
-        self.btn_remove_road = QPushButton("Видалити дорогу")
+        # чекбокс "тільки дуга"
+        self.checkbox_remove_arc_only = QCheckBox("Видалити тільки напрямок (дугу)")
+        self.btn_remove_road = QPushButton("Видалити")
 
         remove_road_form.addRow("З міста:", self.combo_remove_road_from)
         remove_road_form.addRow("До міста:", self.combo_remove_road_to)
+        remove_road_form.addRow(self.checkbox_remove_arc_only)
         remove_road_form.addRow(self.btn_remove_road)
         remove_road_group.setLayout(remove_road_form)
 
@@ -278,8 +282,23 @@ class ControlsPanel(QWidget):
         name = self.city_name_edit.text().strip()
         x = self.city_x_spin.value()
         y = self.city_y_spin.value()
+
         if not name:
+            QMessageBox.warning(
+                self,
+                "Некоректні дані",
+                "Введіть назву міста.",
+            )
             return
+
+        if self._graph_service.has_city(name):
+            QMessageBox.warning(
+                self,
+                "Місто вже існує",
+                f"Місто «{name}» вже є у графі.",
+            )
+            return
+
         self._graph_service.add_city(name, x, y)
         self.city_name_edit.clear()
         self.graph_changed.emit()
@@ -287,7 +306,21 @@ class ControlsPanel(QWidget):
     def _on_remove_city(self) -> None:
         name = self.combo_remove_city.currentText()
         if not name:
+            QMessageBox.warning(
+                self,
+                "Не обрано місто",
+                "Оберіть місто, яке потрібно видалити.",
+            )
             return
+
+        if not self._graph_service.has_city(name):
+            QMessageBox.warning(
+                self,
+                "Місто не знайдено",
+                f"Місто «{name}» відсутнє у графі.",
+            )
+            return
+
         self._graph_service.remove_city(name)
         self.graph_changed.emit()
 
@@ -295,15 +328,76 @@ class ControlsPanel(QWidget):
         source = self.combo_road_from.currentText()
         target = self.combo_road_to.currentText()
         distance = self.road_distance_spin.value()
+
         if not source or not target:
+            QMessageBox.warning(
+                self,
+                "Не обрано міста",
+                "Оберіть обидва міста для створення дороги.",
+            )
             return
+
+        if source == target:
+            QMessageBox.warning(
+                self,
+                "Некоректна дорога",
+                "Неможливо створити дорогу з міста до самого себе.",
+            )
+            return
+
+        if not self._graph_service.has_city(source) or not self._graph_service.has_city(target):
+            QMessageBox.warning(
+                self,
+                "Місто не знайдено",
+                "Одне або обидва обрані міста відсутні у графі.",
+            )
+            return
+
+        if self._graph_service.has_road(source, target):
+            QMessageBox.information(
+                self,
+                "Дорога вже існує",
+                f"Дорога між «{source}» та «{target}» вже існує.",
+            )
+            return
+
         self._graph_service.add_road(source, target, distance)
         self.graph_changed.emit()
 
     def _on_remove_road(self) -> None:
         source = self.combo_remove_road_from.currentText()
         target = self.combo_remove_road_to.currentText()
+
         if not source or not target:
+            QMessageBox.warning(
+                self,
+                "Не обрано міста",
+                "Оберіть обидва міста для видалення дороги.",
+            )
             return
-        self._graph_service.remove_road(source, target)
+
+        arc_only = self.checkbox_remove_arc_only.isChecked()
+
+        if arc_only:
+            # перевіряємо саме дугу source -> target
+            if not self._graph_service.has_arc(source, target):
+                QMessageBox.information(
+                    self,
+                    "Дуги не існує",
+                    f"Напрямок (дуга) «{source} → {target}» відсутній у графі.",
+                )
+                return
+        else:
+            # перевіряємо, що існує хоч якась дорога між містами
+            if not self._graph_service.has_road(source, target):
+                QMessageBox.information(
+                    self,
+                    "Дороги не існує",
+                    f"Дороги між «{source}» та «{target}» немає.",
+                )
+                return
+
+        self._graph_service.remove_road(source, target, arc_only=arc_only)
         self.graph_changed.emit()
+
+

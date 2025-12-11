@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+import math
+
+from PySide6.QtCore import Qt, QTimer, Signal, QLineF, QPointF
 from PySide6.QtGui import QPen, QBrush, QTransform, QFont, QColor, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsView,
@@ -31,8 +33,9 @@ class NodeItems:
 @dataclass
 class EdgeItems:
     """Графічні елементи одного ребра."""
-    line: QGraphicsLineItem
-    label: QGraphicsTextItem
+    line: QGraphicsLineItem  # основна лінія
+    label: QGraphicsTextItem  # підпис
+    arrows: List[QGraphicsLineItem] = None
 
 
 class GraphCanvas(QGraphicsView):
@@ -189,14 +192,46 @@ class GraphCanvas(QGraphicsView):
         self._edge_items.clear()
         self._map_item = None
 
-        # Спочатку додаємо карту, потім ребра й вершини
+        # 1) Карта
         self._add_background_map()
 
-        for edge in self._graph.edges:
-            self._draw_edge(edge.source, edge.target, edge.weight)
-
+        # 2) Спочатку вершини – щоб були label_bg прямокутники
         for name, vertex in self._graph.vertices.items():
             self._draw_vertex(name, vertex.x, vertex.y)
+
+        # 3) А тепер – ребра, з урахуванням напрямків
+        pair_dirs: Dict[frozenset[str], Dict[tuple[str, str], float]] = {}
+
+        for edge in self._graph.edges:
+            a = edge.source
+            b = edge.target
+            w = edge.weight
+            if a not in self._graph.vertices or b not in self._graph.vertices:
+                continue
+
+            key = frozenset((a, b))
+            dirs = pair_dirs.setdefault(key, {})
+            dirs[(a, b)] = w
+
+        for key, dirs in pair_dirs.items():
+            cities = list(key)
+            if len(cities) != 2:
+                continue
+            a, b = cities[0], cities[1]
+
+            w_ab = dirs.get((a, b))
+            w_ba = dirs.get((b, a))
+
+            # двостороння дорога (обидва напрями) – без стрілок
+            if w_ab is not None and w_ba is not None and abs(w_ab - w_ba) < 1e-6:
+                items = self._draw_edge(a, b, w_ab, directed=False)
+                self._edge_items[f"{a}->{b}"] = items
+                self._edge_items[f"{b}->{a}"] = items
+            else:
+                # тільки один напрямок – малюємо дугу зі стрілкою
+                for (src, tgt), w in dirs.items():
+                    items = self._draw_edge(src, tgt, w, directed=True)
+                    self._edge_items[f"{src}->{tgt}"] = items
 
         self._scene.setSceneRect(self._scene.itemsBoundingRect())
         self._apply_all_coloring()
@@ -375,29 +410,207 @@ class GraphCanvas(QGraphicsView):
             label_bg=bg_rect,
         )
 
-    def _draw_edge(self, source: str, target: str, weight: float) -> None:
+    def _draw_edge(
+            self,
+            source: str,
+            target: str,
+            weight: float,
+            directed: bool = False,
+    ) -> EdgeItems:
+        # Якщо з якоїсь причини вершини ще не намальовані – fallback на центри
         v1 = self._graph.vertices[source]
         v2 = self._graph.vertices[target]
 
-        line = self._scene.addLine(
-            v1.x,
-            v1.y,
-            v2.x,
-            v2.y,
-            QPen(self.COLOR_EDGE_BASE, 1.6),
-        )
+        # центри за замовчуванням (якщо не знайдемо прямокутники)
+        c1x, c1y = v1.x, v1.y
+        c2x, c2y = v2.x, v2.y
+        h1w = h1h = self.NODE_RADIUS
+        h2w = h2h = self.NODE_RADIUS
 
-        mid_x = (v1.x + v2.x) / 2
-        mid_y = (v1.y + v2.y) / 2
+        # якщо вже є NodeItems – беремо прямокутники label_bg
+        n1 = self._node_items.get(source)
+        n2 = self._node_items.get(target)
+        if n1 is not None:
+            r1 = n1.label_bg.rect()
+            c1 = r1.center()
+            c1x, c1y = c1.x(), c1.y()
+            h1w = r1.width() / 2.0
+            h1h = r1.height() / 2.0
+        if n2 is not None:
+            r2 = n2.label_bg.rect()
+            c2 = r2.center()
+            c2x, c2y = c2.x(), c2.y()
+            h2w = r2.width() / 2.0
+            h2h = r2.height() / 2.0
+
+        # вектор від source до target
+        dx = c2x - c1x
+        dy = c2y - c1y
+        length = math.hypot(dx, dy) or 1.0
+        ux = dx / length
+        uy = dy / length
+
+        # --- допоміжна функція: перетин променя з прямокутником ---
+        def point_on_rect_edge(cx: float, cy: float,
+                               half_w: float, half_h: float,
+                               dir_x: float, dir_y: float) -> QPointF:
+            """
+            Повертає точку на ребрі прямокутника з центром (cx, cy)
+            у напрямку (dir_x, dir_y).
+            """
+            # нормалізувати напрямок на всяк випадок
+            norm = math.hypot(dir_x, dir_y) or 1.0
+            dir_x /= norm
+            dir_y /= norm
+
+            # скільки можна пройти по x, перш ніж вийдемо за межі
+            if abs(dir_x) > 1e-6:
+                tx = half_w / abs(dir_x)
+            else:
+                tx = float("inf")
+
+            # по y
+            if abs(dir_y) > 1e-6:
+                ty = half_h / abs(dir_y)
+            else:
+                ty = float("inf")
+
+            t = min(tx, ty)
+            return QPointF(cx + dir_x * t, cy + dir_y * t)
+
+        # старт – точка на прямокутнику source у напрямку до target
+        start = point_on_rect_edge(c1x, c1y, h1w, h1h, ux, uy)
+        # кінець – точка на прямокутнику target у напрямку до source
+        end = point_on_rect_edge(c2x, c2y, h2w, h2h, -ux, -uy)
+
+        line = QLineF(start, end)
+        pen = QPen(self.COLOR_EDGE_BASE, 1.6)
+        line_item = self._scene.addLine(line, pen)
+        line_item.setZValue(-1)  # щоб точно під вузлами
+
+        # підпис ваги посередині лінії
+        mid_point = line.pointAt(0.5)
         label = self._scene.addText(f"{weight:.0f}")
         font = QFont()
         font.setPointSize(12)
         label.setFont(font)
         label.setDefaultTextColor(self.COLOR_EDGE_LABEL)
-        label.setPos(mid_x, mid_y)
+        label.setPos(mid_point.x(), mid_point.y())
 
-        key = f"{source}->{target}"
-        self._edge_items[key] = EdgeItems(line=line, label=label)
+        # ---- НОВА ЧАСТИНА: збираємо стрілки в список ----
+        arrow_items: List[QGraphicsLineItem] = []
+
+        # Стрілка тільки якщо орієнтована дуга
+        if directed:
+            angle = math.atan2(-line.dy(), line.dx())
+            arrow_size = 10.0
+
+            tip = end  # вершина стрілки на краю прямокутника target
+
+            p1 = tip + QPointF(
+                -arrow_size * math.cos(angle - math.pi / 6),
+                arrow_size * math.sin(angle - math.pi / 6),
+            )
+            p2 = tip + QPointF(
+                -arrow_size * math.cos(angle + math.pi / 6),
+                arrow_size * math.sin(angle + math.pi / 6),
+            )
+
+            a1 = self._scene.addLine(QLineF(tip, p1), pen)
+            a2 = self._scene.addLine(QLineF(tip, p2), pen)
+            a1.setZValue(-1)
+            a2.setZValue(-1)
+
+            arrow_items = [a1, a2]
+
+        return EdgeItems(line=line_item, label=label, arrows=arrow_items)
+
+    def _update_edge_geometry(self, source: str, target: str, edge: EdgeItems) -> None:
+        """
+        Перераховує положення лінії, лейбла та стрілок для ребра source -> target
+        згідно з поточними координатами вершин і прямокутників label_bg.
+        """
+        if source not in self._graph.vertices or target not in self._graph.vertices:
+            return
+
+        v1 = self._graph.vertices[source]
+        v2 = self._graph.vertices[target]
+
+        # центри за замовчуванням
+        c1x, c1y = v1.x, v1.y
+        c2x, c2y = v2.x, v2.y
+        h1w = h1h = self.NODE_RADIUS
+        h2w = h2h = self.NODE_RADIUS
+
+        n1 = self._node_items.get(source)
+        n2 = self._node_items.get(target)
+        if n1 is not None:
+            r1 = n1.label_bg.rect()
+            c1 = r1.center()
+            c1x, c1y = c1.x(), c1.y()
+            h1w = r1.width() / 2.0
+            h1h = r1.height() / 2.0
+        if n2 is not None:
+            r2 = n2.label_bg.rect()
+            c2 = r2.center()
+            c2x, c2y = c2.x(), c2.y()
+            h2w = r2.width() / 2.0
+            h2h = r2.height() / 2.0
+
+        dx = c2x - c1x
+        dy = c2y - c1y
+        length = math.hypot(dx, dy) or 1.0
+        ux = dx / length
+        uy = dy / length
+
+        def point_on_rect_edge(cx: float, cy: float,
+                               half_w: float, half_h: float,
+                               dir_x: float, dir_y: float) -> QPointF:
+            norm = math.hypot(dir_x, dir_y) or 1.0
+            dir_x /= norm
+            dir_y /= norm
+
+            if abs(dir_x) > 1e-6:
+                tx = half_w / abs(dir_x)
+            else:
+                tx = float("inf")
+
+            if abs(dir_y) > 1e-6:
+                ty = half_h / abs(dir_y)
+            else:
+                ty = float("inf")
+
+            t = min(tx, ty)
+            return QPointF(cx + dir_x * t, cy + dir_y * t)
+
+        start = point_on_rect_edge(c1x, c1y, h1w, h1h, ux, uy)
+        end = point_on_rect_edge(c2x, c2y, h2w, h2h, -ux, -uy)
+
+        line = QLineF(start, end)
+        edge.line.setLine(line)
+
+        mid_point = line.pointAt(0.5)
+        edge.label.setPos(mid_point.x(), mid_point.y())
+
+        # якщо є стрілки – оновлюємо й їх
+        if edge.arrows:
+            angle = math.atan2(-line.dy(), line.dx())
+            arrow_size = 10.0
+            tip = end
+
+            p1 = tip + QPointF(
+                -arrow_size * math.cos(angle - math.pi / 6),
+                arrow_size * math.sin(angle - math.pi / 6),
+            )
+            p2 = tip + QPointF(
+                -arrow_size * math.cos(angle + math.pi / 6),
+                arrow_size * math.sin(angle + math.pi / 6),
+            )
+
+            if len(edge.arrows) >= 2:
+                edge.arrows[0].setLine(QLineF(tip, p1))
+                edge.arrows[1].setLine(QLineF(tip, p2))
+
 
     # ---------- Кольори / стилі ----------
 
@@ -411,6 +624,11 @@ class GraphCanvas(QGraphicsView):
             pen = QPen(self.COLOR_EDGE_BASE, 1.6)
             edge.line.setPen(pen)
             edge.label.setDefaultTextColor(self.COLOR_EDGE_LABEL)
+
+            # скидаємо колір стрілок, якщо вони є
+            if edge.arrows:
+                for a in edge.arrows:
+                    a.setPen(pen)
 
     def _apply_path_highlight(self) -> None:
         """Підсвічує знайдений шлях (якщо path_visible = True)."""
@@ -433,10 +651,14 @@ class GraphCanvas(QGraphicsView):
             key2 = f"{b}->{a}"
             edge = self._edge_items.get(key1) or self._edge_items.get(key2)
             if edge:
-                pen = edge.line.pen()
-                pen.setWidth(3)
-                pen.setColor(self.COLOR_PATH_EDGE)
+                pen = QPen(self.COLOR_PATH_EDGE, 3)
+
                 edge.line.setPen(pen)
+
+                # фарбуємо стрілки, якщо вони є
+                if edge.arrows:
+                    for a in edge.arrows:
+                        a.setPen(pen)
 
     def _apply_source_target_markers(self) -> None:
         """Підсвічує source/target поверх усього."""
@@ -502,10 +724,13 @@ class GraphCanvas(QGraphicsView):
             key2 = f"{step.neighbor}->{step.current}"
             edge = self._edge_items.get(key1) or self._edge_items.get(key2)
             if edge:
-                pen = edge.line.pen()
-                pen.setWidth(3)
-                pen.setColor(self.COLOR_NEIGHBOR)
+                pen = QPen(self.COLOR_NEIGHBOR, 3)
+
                 edge.line.setPen(pen)
+
+                if edge.arrows:
+                    for a in edge.arrows:
+                        a.setPen(pen)
 
         # 5) source / target поверх усього
         self._apply_source_target_markers()
@@ -602,17 +827,12 @@ class GraphCanvas(QGraphicsView):
                 v.y - br.height() / 2,
             )
 
-            # оновлюємо всі ребра, де ця вершина
+            # оновлюємо всі ребра, де ця вершина (лінія + лейбл + стрілки)
             for key, edge_item in self._edge_items.items():
                 src, tgt = key.split("->", maxsplit=1)
                 if src not in self._graph.vertices or tgt not in self._graph.vertices:
                     continue
-                v1 = self._graph.vertices[src]
-                v2 = self._graph.vertices[tgt]
-                edge_item.line.setLine(v1.x, v1.y, v2.x, v2.y)
-                mid_x = (v1.x + v2.x) / 2
-                mid_y = (v1.y + v2.y) / 2
-                edge_item.label.setPos(mid_x, mid_y)
+                self._update_edge_geometry(src, tgt, edge_item)
 
             return
 
