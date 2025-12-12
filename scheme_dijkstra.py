@@ -4,6 +4,10 @@ from graphviz import Digraph
 dot = Digraph('Dijkstra_Flow', format='png')
 dot.attr(rankdir='TB', size='8,12')
 
+dot.attr('graph', fontname='DejaVu Sans')
+dot.attr('node',  fontname='DejaVu Sans')
+dot.attr('edge',  fontname='DejaVu Sans')
+
 # Вузли
 dot.node('A', 'Початок', shape='oval')
 
